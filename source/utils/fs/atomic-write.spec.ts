@@ -153,6 +153,69 @@ test.serial('publishFileNoClobber falls back to exclusive write when hard links 
 	}
 });
 
+test.serial('atomicWriteFile survives concurrent writers to the same file', async t => {
+	const tempDir = await createTempDir();
+	try {
+		const filePath = path.join(tempDir, 'shared.json');
+		for (let round = 0; round < 20; round++) {
+			const results = await Promise.allSettled(
+				Array.from({length: 16}, (_, i) =>
+					atomicWriteFile(filePath, `round ${round} writer ${i}`),
+				),
+			);
+			const failures = results.filter(r => r.status === 'rejected');
+			t.deepEqual(failures, [], `round ${round}`);
+		}
+		t.deepEqual(await listTempFiles(tempDir), []);
+	} finally {
+		await cleanupTempDir(tempDir);
+	}
+});
+
+test.serial('atomicWriteFile retries a rename that hits a sharing violation', async t => {
+	const tempDir = await createTempDir();
+	try {
+		const filePath = path.join(tempDir, 'out.txt');
+		let calls = 0;
+		setRenameForTests(async (from, to) => {
+			calls++;
+			if (calls <= 2) throw errnoError(calls === 1 ? 'EPERM' : 'EBUSY');
+			await fs.rename(from, to);
+		});
+		try {
+			await atomicWriteFile(filePath, 'hello');
+		} finally {
+			setRenameForTests();
+		}
+		t.is(calls, 3);
+		t.is(await fs.readFile(filePath, 'utf-8'), 'hello');
+	} finally {
+		await cleanupTempDir(tempDir);
+	}
+});
+
+test.serial('atomicWriteFile does not retry other rename errors', async t => {
+	const tempDir = await createTempDir();
+	try {
+		const filePath = path.join(tempDir, 'out.txt');
+		let calls = 0;
+		setRenameForTests(async () => {
+			calls++;
+			throw errnoError('ENOSPC');
+		});
+		try {
+			const error = await t.throwsAsync(atomicWriteFile(filePath, 'hello'));
+			t.is((error as NodeJS.ErrnoException).code, 'ENOSPC');
+		} finally {
+			setRenameForTests();
+		}
+		t.is(calls, 1);
+		t.deepEqual(await listTempFiles(tempDir), []);
+	} finally {
+		await cleanupTempDir(tempDir);
+	}
+});
+
 function errnoError(code: string): NodeJS.ErrnoException {
 	const error = new Error(`${code}: simulated`) as NodeJS.ErrnoException;
 	error.code = code;

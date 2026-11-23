@@ -21,6 +21,47 @@ import {
 import {basename, dirname, join} from 'node:path';
 
 /**
+ * Windows refuses to rename onto a file that another rename or reader has
+ * open (EPERM/EBUSY/EACCES); the holder lets go within milliseconds, so a
+ * short bounded retry beats failing the write. POSIX never hits this.
+ */
+const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160];
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+function isRetryableRenameError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null | undefined)?.code;
+	return code !== undefined && RETRYABLE_RENAME_CODES.has(code);
+}
+
+function renameWithRetrySync(from: string, to: string): void {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			renameSync(from, to);
+			return;
+		} catch (error) {
+			const delay = RENAME_RETRY_DELAYS_MS[attempt];
+			if (delay === undefined || !isRetryableRenameError(error)) throw error;
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+		}
+	}
+}
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await renameImpl(from, to);
+			return;
+		} catch (error) {
+			const delay = RENAME_RETRY_DELAYS_MS[attempt];
+			if (delay === undefined || !isRetryableRenameError(error)) throw error;
+			await new Promise<void>(resolve => {
+				setTimeout(resolve, delay);
+			});
+		}
+	}
+}
+
+/**
  * Write data to disk via a temp file + atomic rename, so a crash mid-write can
  * never leave a truncated file at the target path. Callers are responsible for
  * ensuring the parent directory exists.
@@ -40,7 +81,7 @@ export function atomicWriteFileSync(
 				mode: options.mode,
 			});
 		}
-		renameSync(tmpPath, filePath);
+		renameWithRetrySync(tmpPath, filePath);
 	} catch (error) {
 		try {
 			unlinkSync(tmpPath);
@@ -65,7 +106,7 @@ export async function atomicWriteFile(
 		} else {
 			await writeFile(tmpPath, data, {encoding: 'utf-8', mode: options.mode});
 		}
-		await rename(tmpPath, filePath);
+		await renameWithRetry(tmpPath, filePath);
 	} catch (error) {
 		try {
 			await unlink(tmpPath);
@@ -75,7 +116,8 @@ export async function atomicWriteFile(
 }
 
 /**
- * Rename primitive used by {@link atomicWriteUserFile}, replaceable for tests
+ * Rename primitive used by {@link atomicWriteFile} and
+ * {@link atomicWriteUserFile}, replaceable for tests
  * (e.g. to simulate a bind-mounted file or a cross-device move).
  * Production code never touches this.
  * @internal
@@ -85,7 +127,8 @@ type RenameFn = (oldPath: string, newPath: string) => Promise<void>;
 let renameImpl: RenameFn = (oldPath, newPath) => rename(oldPath, newPath);
 
 /**
- * Test seam: replace the rename primitive used by {@link atomicWriteUserFile}.
+ * Test seam: replace the rename primitive used by {@link atomicWriteFile} and
+ * {@link atomicWriteUserFile}.
  * Call with no arguments to restore the default.
  * @internal
  */
