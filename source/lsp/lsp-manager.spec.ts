@@ -9,6 +9,7 @@ import {
 	getLSPManager,
 	normalizeUri,
 	resetLSPManager,
+	withUncoveredLanguages,
 } from './lsp-manager';
 
 console.log(`\nlsp-manager.spec.ts`);
@@ -574,5 +575,48 @@ test('normalizeUri - preserves non-file and unrepresentable URIs', t => {
 	t.is(
 		normalizeUri('file://server/share/App.ts', {windows: true}),
 		'file://server/share/App.ts',
+	);
+});
+
+// withUncoveredLanguages tests
+test('withUncoveredLanguages - leaves a configured server its languages', t => {
+	const configured = [{name: 'my-custom-ts', command: 'x', languages: ['ts']}];
+	const discovered = [
+		{
+			name: 'typescript-language-server',
+			command: 'tsls',
+			args: ['--stdio'],
+			languages: ['ts', 'tsx', 'js'],
+		},
+	];
+
+	t.deepEqual(withUncoveredLanguages(configured, discovered), [
+		{
+			name: 'typescript-language-server',
+			command: 'tsls',
+			args: ['--stdio'],
+			languages: ['tsx', 'js'],
+		},
+	]);
+	t.deepEqual(configured[0]?.languages, ['ts']);
+	t.deepEqual(discovered[0]?.languages, ['ts', 'tsx', 'js']);
+});
+
+test('withUncoveredLanguages - drops a server whose languages are all claimed', t => {
+	const configured = [{name: 'custom', command: 'x', languages: ['py', 'pyi']}];
+	const discovered = [{name: 'pyright', command: 'p', languages: ['py', 'pyi']}];
+
+	t.deepEqual(withUncoveredLanguages(configured, discovered), []);
+});
+
+test('withUncoveredLanguages - an earlier discovered server keeps shared languages', t => {
+	const discovered = [
+		{name: 'yaml', command: 'y', languages: ['yaml', 'yml']},
+		{name: 'compose', command: 'c', languages: ['yaml', 'yml', 'docker-compose']},
+	];
+
+	t.deepEqual(
+		withUncoveredLanguages([], discovered).map(s => s.languages),
+		[['yaml', 'yml'], ['docker-compose']],
 	);
 });

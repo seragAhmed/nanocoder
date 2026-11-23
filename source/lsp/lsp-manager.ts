@@ -58,6 +58,26 @@ const CRASH_STDERR_LINES = 10;
 const FIRST_DIAGNOSTICS_WAIT_MS = 5000;
 
 /**
+ * Discovered servers limited to the languages no earlier server claims, so a
+ * configured server keeps every language it declares. A discovered server
+ * left with no languages is dropped.
+ */
+export function withUncoveredLanguages(
+	claimed: LSPServerConfig[],
+	discovered: LSPServerConfig[],
+): LSPServerConfig[] {
+	const covered = new Set(claimed.flatMap(server => server.languages));
+	const result: LSPServerConfig[] = [];
+	for (const server of discovered) {
+		const languages = server.languages.filter(lang => !covered.has(lang));
+		if (languages.length === 0) continue;
+		result.push({...server, languages});
+		for (const lang of languages) covered.add(lang);
+	}
+	return result;
+}
+
+/**
  * One spelling per file, so a URI the server publishes matches the one we
  * opened (servers re-encode URIs, e.g. a drive letter's colon on Windows).
  */
@@ -135,27 +155,8 @@ export class LSPManager extends EventEmitter {
 				: this.rootUri;
 			const discovered = await discoverLanguageServers(projectRoot);
 
-			// Only add discovered servers for languages not already covered
-			const coveredLanguages = new Set<string>();
-			for (const server of serversToStart) {
-				for (const lang of server.languages) {
-					coveredLanguages.add(lang);
-				}
-			}
-
-			for (const server of discovered) {
-				const hasNewLanguages = server.languages.some(
-					lang => !coveredLanguages.has(lang),
-				);
-				if (hasNewLanguages) {
-					serversToStart.push({
-						...server,
-						rootUri: this.rootUri,
-					});
-					for (const lang of server.languages) {
-						coveredLanguages.add(lang);
-					}
-				}
+			for (const server of withUncoveredLanguages(serversToStart, discovered)) {
+				serversToStart.push({...server, rootUri: this.rootUri});
 			}
 		}
 
